@@ -15,10 +15,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote
 
+from authlib.integrations.base_client import OAuthError
+from authlib.integrations.base_client.errors import MismatchingStateError
 from authlib.integrations.starlette_client import OAuth
 from cryptography.fernet import Fernet, InvalidToken
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
-from fastapi.responses import JSONResponse, RedirectResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 import pymupdf
 from pydantic import BaseModel, Field
@@ -276,6 +278,65 @@ if TENANT_ID and CLIENT_ID and CLIENT_SECRET:
     )
 
 
+# authlib keeps a single pending OAuth state per provider in the session and
+# drops the previous one on every new /auth/login request. A browser can send
+# that request more than once for one user (double click on the sign-in button,
+# a second tab, link prefetch, reload during the redirect). The round trip that
+# comes back with the state that was dropped then fails with
+# "MismatchingStateError: CSRF Warning! State not equal in request and response",
+# which surfaced as an HTTP 500 on /auth/callback.
+# Keep a few recent states so overlapping sign-in attempts stay independent.
+_MAX_PENDING_OAUTH_STATES = 4
+
+try:
+    from authlib.integrations.starlette_client.integration import StarletteIntegration
+
+    _authlib_set_state_data = StarletteIntegration.set_state_data
+
+    async def _set_state_data_keep_pending(self, session, state, data):
+        """Store the new state but keep the previous few pending ones too."""
+        key_prefix = f"_state_{self.name}_"
+        kept: dict[str, object] = {}
+        if session is not None:
+            kept = {
+                key: value
+                for key, value in list(session.items())
+                if key.startswith(key_prefix)
+            }
+        await _authlib_set_state_data(self, session, state, data)
+        if session is None:
+            return
+        for key, value in kept.items():
+            if key not in session:
+                session[key] = value
+        pending = [key for key in session if key.startswith(key_prefix)]
+        while len(pending) > _MAX_PENDING_OAUTH_STATES:
+            session.pop(pending.pop(0), None)
+
+    StarletteIntegration.set_state_data = _set_state_data_keep_pending
+except Exception:  # pragma: no cover - never block sign-in if authlib changes
+    logger.warning("Could not keep multiple OAuth states pending", exc_info=True)
+
+
+def _auth_error_page(message: str, status_code: int = 400) -> HTMLResponse:
+    return HTMLResponse(
+        status_code=status_code,
+        content=(
+            "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
+            "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+            "<title>Sign-in problem</title>"
+            "<style>body{margin:0;min-height:100vh;display:grid;place-items:center;"
+            "background:#0f172a;color:#e2e8f0;font-family:system-ui,sans-serif}"
+            "main{max-width:34rem;padding:2rem;text-align:center;line-height:1.5}"
+            "a{display:inline-block;margin-top:1.25rem;padding:.65rem 1.3rem;"
+            "border-radius:.55rem;background:#2563eb;color:#fff;text-decoration:none}"
+            "</style></head><body><main><h1>Sign-in problem</h1>"
+            f"<p>{message}</p><a href=\"/auth/login\">Try signing in again</a>"
+            "</main></body></html>"
+        ),
+    )
+
+
 def _configured_identity_provider() -> bool:
     return bool(TENANT_ID and CLIENT_ID and CLIENT_SECRET)
 
@@ -468,6 +529,8 @@ async def login(request: Request):
             status_code=503,
             detail="Microsoft Entra sign-in is not configured. Set the ENTRA_* variables.",
         )
+    pending = [key for key in request.session if key.startswith("_state_entra_")]
+    logger.info("Starting Microsoft Entra sign-in (pending states: %d)", len(pending))
     return await oauth.entra.authorize_redirect(request, f"{PUBLIC_BASE_URL}/auth/callback")
 
 
@@ -475,7 +538,27 @@ async def login(request: Request):
 async def auth_callback(request: Request, db: Session = Depends(get_db)):
     if not _configured_identity_provider():
         raise HTTPException(status_code=503, detail="Microsoft Entra sign-in is not configured.")
-    token = await oauth.entra.authorize_access_token(request)
+    try:
+        token = await oauth.entra.authorize_access_token(request)
+    except MismatchingStateError:
+        pending = [key for key in request.session if key.startswith("_state_entra_")]
+        logger.warning(
+            "Entra callback state mismatch (session cookie received: %s, pending states: %d, "
+            "state parameter present: %s)",
+            "paperwork_session" in request.cookies,
+            len(pending),
+            bool(request.query_params.get("state")),
+        )
+        return _auth_error_page(
+            "Your sign-in session expired or was replaced by another sign-in attempt. "
+            "Start the sign-in again from this page."
+        )
+    except OAuthError as exc:
+        logger.warning("Entra token exchange failed: %s", exc)
+        return _auth_error_page(
+            "Microsoft could not complete the sign-in. Start the sign-in again from this page.",
+            status_code=502,
+        )
     claims = token.get("userinfo")
     if not claims:
         raise HTTPException(status_code=401, detail="The identity provider returned no user profile.")
