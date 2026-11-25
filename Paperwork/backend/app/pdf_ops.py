@@ -960,12 +960,19 @@ def _booklet_imposition(document_bytes: bytes, options: dict[str, str | bytes]) 
                     if page_index < 0 or page_index >= total:
                         continue
                     cell_x = column * cell_w + (g / 2 if column == left_col else -g / 2)
+                    cell_rect = pymupdf.Rect(
+                        cell_x, 0, cell_x + cell_w - g / 2, cell_h
+                    )
                     out_page.show_pdf_page(
-                        pymupdf.Rect(cell_x, 0, cell_x + cell_w - g / 2, cell_h),
+                        cell_rect,
                         source,
                         page_index,
                         overlay=True,
                     )
+                    if add_border:
+                        out_page.draw_rect(
+                            cell_rect, color=(0, 0, 0), width=0.5, overlay=True
+                        )
         return output.tobytes(garbage=4, deflate=True, clean=True), output.page_count
     finally:
         output.close()
