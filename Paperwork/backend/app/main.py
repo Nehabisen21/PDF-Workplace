@@ -609,7 +609,11 @@ async def auth_callback(request: Request, db: Session = Depends(get_db)):
         db.rollback()
         raise HTTPException(status_code=403, detail="Your account has been deactivated.")
     display_name = claims.get("name") or email or subject
-    default_team = db.query(Team).filter_by(name="Default").one()
+    default_team = db.query(Team).filter_by(name="Default").one_or_none()
+    if default_team is None:
+        default_team = Team(name="Default")
+        db.add(default_team)
+        db.flush()
     if user is None:
         user = User(
             issuer=issuer,
@@ -725,7 +729,11 @@ def local_admin_login(
             detail="Multiple accounts use the configured local admin email; resolve the duplicates first.",
         )
     user = local_matches[0] if local_matches else None
-    default_team = db.query(Team).filter_by(name="Default").one()
+    default_team = db.query(Team).filter_by(name="Default").one_or_none()
+    if default_team is None:
+        default_team = Team(name="Default")
+        db.add(default_team)
+        db.flush()
     if user is None:
         user = User(
             issuer="local-admin",
