@@ -2724,6 +2724,7 @@ async function loadAccount() {
     document.querySelector("#entra-login").hidden = !options.entra_enabled;
     document.querySelector("#login-divider").hidden = !options.entra_enabled;
     document.querySelector("#local-admin-config-note").hidden = options.local_admin_enabled;
+    document.querySelector("#tool-search-box").hidden = true;
     document.querySelector("#signed-out").hidden = false;
     document.querySelector("#login-error").textContent = message;
     return;
@@ -2732,6 +2733,7 @@ async function loadAccount() {
   const user = await response.json();
   signedInUser = user;
   document.querySelector("#workspace").hidden = false;
+  document.querySelector("#tool-search-box").hidden = false;
   document.querySelector("#theme-picker-button").hidden = true;
   document.querySelector("#account").hidden = false;
   document.querySelector("#user-name").textContent = user.name || user.email || "Account";
@@ -2973,6 +2975,7 @@ document.querySelector("#done-developer-tools").addEventListener("click", () => 
 });
 document.addEventListener("keydown", (event) => {
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
+    if (document.querySelector("#tool-search-box").hidden) return;
     event.preventDefault();
     document.querySelector("#tool-search").focus();
   }
